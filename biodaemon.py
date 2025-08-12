@@ -1,85 +1,112 @@
-# file: biodaemon_v1.2.py
+# file: biodaemon_v1.3.py
 """
-BioDaemon v1.2
-A stable, fully integrated OSINT analysis platform with a persistent database,
-case management, advanced NER analysis, and enhanced interactive reporting.
+BioDaemon v1.3
+A fully integrated, single-file OSINT platform with:
+- Async HTTP engine (aiohttp) + exponential backoff
+- Pluggable in-file modules (username check, domain WHOIS/DNS, HIBP, Twitter, Reddit)
+- Case management with SQLite (FTS5 full‑text, artifacts table, normalized storage)
+- NER (spaCy, auto-upgrade to en_core_web_trf if present)
+- Artifact extraction (emails, phones, domains, IPs, URLs, handles)
+- Interactive Rich UI + headless CLI flags
+- Interactive HTML report (PyVis graph) + GEXF export (Gephi)
+- Optional PDF export (WeasyPrint) if installed
+- Optional Playwright page fetch (if installed) for JS-heavy pages (opt-in via --use-browser)
 
-Changes from v1.1:
-- Fixed googlesearch import SyntaxError
-- Added select_autoescape import for Jinja2
-- Corrected SQLite Row handling and primary target retrieval
-- Aligned module dispatcher names (username_check)
-- Implemented fetch_reddit (skips cleanly if missing creds)
-- Guarded executor submit against missing functions
-- Minor timestamp label fix
+Usage examples:
+  Interactive:
+    python biodaemon_v1.3.py
+  Headless (new case, username check + domain info):
+    python biodaemon_v1.3.py --headless --new-case "Acme_Investigation" --primary "acme_corp" \
+      --modules username_check,domain_info --username acmec0rp --domain example.com
+  Headless with HIBP (requires API key in credentials.json):
+    python biodaemon_v1.3.py --headless --load-case "Acme_Investigation" \
+      --modules hibp_email --email user@example.com --report html,pdf,graph,gexf
 """
 
 import sys
 import subprocess
 import json
 import time
+import os
 import logging
 import sqlite3
 from pathlib import Path
 from datetime import datetime, timezone
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
+import asyncio
 import re
+import argparse
+from typing import Dict, Any, Callable, Optional, List, Tuple
 
-# --- Dependency Management ---
+# ---------- Dependency Management ----------
+def ensure_deps():
+    try:
+        import aiohttp  # noqa
+        import rich  # noqa
+        import jinja2  # noqa
+        import spacy  # noqa
+        import networkx  # noqa
+        import pyvis  # noqa
+        import dnspython  # noqa
+        import whois  # noqa
+        from PIL import Image  # noqa
+    except Exception:
+        print("[*] Installing core dependencies (this may take a minute)...")
+        pkgs = [
+            "aiohttp", "rich", "jinja2", "spacy", "networkx", "pyvis",
+            "dnspython", "python-whois", "Pillow", "tweepy", "praw",
+            "vaderSentiment", "geopy", "folium", "weasyprint"
+        ]
+        subprocess.call([sys.executable, "-m", "pip", "install", *pkgs])
+
+ensure_deps()
+
+# Now import everything we need (after auto-install if needed)
+import aiohttp
+from contextlib import asynccontextmanager
+from rich.console import Console
+from rich.table import Table
+from rich.progress import Progress, SpinnerColumn, TextColumn
+from rich.prompt import Prompt, IntPrompt
+from rich.panel import Panel
+from rich.text import Text
+from jinja2 import Environment, select_autoescape
+import whois
+import dns.resolver
+import spacy
+import networkx as nx
+from pyvis.network import Network
+
+# Optional libs (only used if present / configured)
 try:
-    from rich.console import Console
-    from rich.table import Table
-    from rich.progress import Progress, SpinnerColumn, TextColumn
-    from rich.prompt import Confirm, Prompt, IntPrompt
-    from rich.text import Text
-    from rich.panel import Panel
-    import requests
-    import instaloader
     import tweepy
-    from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
-    import praw
-    import networkx as nx
-    from pyvis.network import Network
-    import folium
-    from jinja2 import Environment, select_autoescape
-    import whois
-    import dns.resolver
-    import spacy
-    from geopy.geocoders import Nominatim
-    from PIL import Image, ExifTags
-    # fixed: no space in alias
-    from googlesearch import search as google_search
-except ImportError:
-    console = Console()
-    console.print(Panel("[yellow]Major dependencies missing. Attempting automatic installation...[/yellow]", title="Setup", border_style="yellow"))
-    packages = [
-        "rich", "requests[socks]", "instaloader", "tweepy", "vaderSentiment", "praw",
-        "networkx", "pyvis", "folium", "jinja2", "python-whois",
-        "dnspython", "spacy", "geopy", "Pillow", "googlesearch-python"
-    ]
-    subprocess.call([sys.executable, "-m", "pip", "install", *packages])
-    console.print("\n[bold green]Core dependencies installed.[/bold green]")
-    console.print("[yellow]Now downloading required NLP model for spaCy...[/yellow]")
-    subprocess.call([sys.executable, "-m", "spacy", "download", "en_core_web_sm"])
-    console.print("\n[bold green]Setup complete. Please re-run the script.[/bold green]")
-    sys.exit(0)
+except Exception:
+    tweepy = None
 
-# --- Check for spaCy Model ---
 try:
-    nlp = spacy.load("en_core_web_sm")
-except OSError:
-    console = Console()
-    console.print(Panel("[bold red]SpaCy NLP model 'en_core_web_sm' not found.[/bold red]", border_style="red"))
-    console.print("Please run this command in your terminal to download it:")
-    console.print("[cyan]python -m spacy download en_core_web_sm[/cyan]")
-    sys.exit(1)
+    import praw
+except Exception:
+    praw = None
 
-# --- Globals & Configuration ---
+try:
+    from weasyprint import HTML as WeasyHTML
+except Exception:
+    WeasyHTML = None
+
+try:
+    from playwright.async_api import async_playwright
+except Exception:
+    async_playwright = None
+
+# ---------- Globals & Config ----------
 logging.basicConfig(level=logging.INFO, format='[%(levelname)s] %(asctime)s - %(message)s', datefmt="%Y-%m-%d %H:%M:%S")
 console = Console()
 CONFIG_FILE = Path("credentials.json")
 CASES_DIR = Path("cases")
-REQUEST_TIMEOUT = 20
+REQUEST_TIMEOUT = 25
+DEFAULT_UA = "BioDaemon/1.3 (+https://example.local)"
+REPORTS_DIRNAME = "reports"
+
 SITES_FOR_USERNAME_CHECK = {
     "GitHub": "https://github.com/{}",
     "Twitter": "https://twitter.com/{}",
@@ -90,50 +117,151 @@ SITES_FOR_USERNAME_CHECK = {
     "TikTok": "https://www.tiktok.com/@{}"
 }
 
-# --- Utility Functions ---
-def load_config():
+# ---------- NLP (spaCy) ----------
+def load_nlp():
+    try:
+        return spacy.load("en_core_web_trf")
+    except Exception:
+        try:
+            return spacy.load("en_core_web_sm")
+        except OSError:
+            console.print(Panel("[bold red]spaCy model not found.[/bold red]\nInstalling 'en_core_web_sm'...", border_style="red"))
+            subprocess.call([sys.executable, "-m", "spacy", "download", "en_core_web_sm"])
+            return spacy.load("en_core_web_sm")
+
+nlp = load_nlp()
+
+# ---------- Utility ----------
+def load_config() -> dict:
     if not CONFIG_FILE.exists():
-        console.print(Panel("⚠️ [yellow]credentials.json not found![/yellow]", border_style="yellow"))
         return {}
     try:
         return json.load(open(CONFIG_FILE, "r", encoding="utf-8"))
-    except json.JSONDecodeError:
+    except Exception:
         console.print(Panel("🚨 [red]credentials.json is malformed.[/red]"))
         return {}
 
-def get_session(use_tor: bool = False):
-    session = requests.Session()
-    if use_tor:
-        session.proxies = {"http": "socks5h://127.0.0.1:9050", "https": "socks5h://127.0.0.1:9050"}
+def utcnow_iso():
+    return datetime.now(timezone.utc).isoformat()
+
+# ---------- Async HTTP with Backoff ----------
+class Http:
+    def __init__(self, ua: str = DEFAULT_UA, max_conn: int = 50, proxy: Optional[str] = None, use_browser: bool = False):
+        self.ua = ua
+        self.conn = aiohttp.TCPConnector(limit=max_conn)
+        self.session: Optional[aiohttp.ClientSession] = None
+        self.proxy = proxy
+        self.use_browser = use_browser and async_playwright is not None
+        self._browser_ctx = None
+
+    @asynccontextmanager
+    async def session_ctx(self):
+        if not self.session:
+            self.session = aiohttp.ClientSession(connector=self.conn, headers={"User-Agent": self.ua})
         try:
-            with console.status("[cyan]Checking Tor connection...[/cyan]", spinner="earth"):
-                r = session.get("https://check.torproject.org", timeout=REQUEST_TIMEOUT)
-                if "Congratulations. This browser is configured to use Tor." in r.text:
-                    logging.info("Tor connection successful.")
-                    return session
-            console.print(Panel("[red]Tor check failed.[/red]", border_style="red"))
-            return None
-        except requests.RequestException as e:
-            logging.error(f"Tor check failed: {e}")
-            console.print(Panel("[red]Tor connection failed. Is service running on port 9050?[/red]", border_style="red"))
-            return None
-    return session
+            yield self.session
+        finally:
+            pass
 
-def validate_choice(input_str: str, options_len: int):
-    """Validates user's comma-separated module choices."""
-    try:
-        chosen = {int(item.strip()) for item in input_str.split(",")}
-        if all(1 <= idx <= options_len for idx in chosen):
-            return sorted(list(chosen))
-        return None
-    except ValueError:
-        return None
+    async def close(self):
+        if self.session:
+            await self.session.close()
+            self.session = None
+        if self._browser_ctx:
+            try:
+                await self._browser_ctx.close()
+            except Exception:
+                pass
+            self._browser_ctx = None
 
-# --- Database Management ---
+    async def get(self, url: str, timeout: int = REQUEST_TIMEOUT, allow_browser: bool = False) -> Tuple[int, str, str]:
+        """
+        Returns (status, text, final_url). If allow_browser and self.use_browser, try Playwright on 403/503.
+        """
+        async with self.session_ctx() as s:
+            try:
+                async with s.get(url, proxy=self.proxy, timeout=timeout, allow_redirects=True) as r:
+                    txt = await r.text(errors="ignore")
+                    return r.status, txt, str(r.url)
+            except Exception:
+                if allow_browser and self.use_browser:
+                    return await self._browser_fetch(url, timeout)
+                raise
+
+    async def head_or_get(self, url: str, timeout: int = REQUEST_TIMEOUT) -> int:
+        async with self.session_ctx() as s:
+            try:
+                async with s.head(url, proxy=self.proxy, timeout=timeout, allow_redirects=True) as r:
+                    return r.status
+            except Exception:
+                try:
+                    async with s.get(url, proxy=self.proxy, timeout=timeout, allow_redirects=True) as r:
+                        return r.status
+                except Exception:
+                    return -1
+
+    async def _browser_fetch(self, url: str, timeout: int) -> Tuple[int, str, str]:
+        # Lazy init
+        if not self._browser_ctx:
+            pw = await async_playwright().start()
+            browser = await pw.chromium.launch(headless=True)
+            self._browser_ctx = await browser.new_context(user_agent=self.ua)
+        page = await self._browser_ctx.new_page()
+        try:
+            resp = await page.goto(url, timeout=timeout * 1000, wait_until="networkidle")
+            status = resp.status if resp else 0
+            content = await page.content()
+            final_url = page.url
+            await page.close()
+            return status, content, final_url
+        except Exception:
+            try:
+                await page.close()
+            except Exception:
+                pass
+            return 0, "", url
+
+async def with_backoff(coro: Callable, max_tries=4, base=0.6):
+    last_exc = None
+    for i in range(max_tries):
+        try:
+            return await coro()
+        except Exception as e:
+            last_exc = e
+            await asyncio.sleep(base * (2 ** i) + 0.2 * (i))
+    if last_exc:
+        raise last_exc
+
+# ---------- Database (SQLite + FTS5) ----------
 def init_database(conn: sqlite3.Connection):
     c = conn.cursor()
     c.execute('CREATE TABLE IF NOT EXISTS targets (id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE, type TEXT)')
-    c.execute('CREATE TABLE IF NOT EXISTS results (id INTEGER PRIMARY KEY, target_id INTEGER, module TEXT, timestamp TEXT, summary TEXT, raw_data TEXT, FOREIGN KEY(target_id) REFERENCES targets(id), UNIQUE(target_id, module))')
+    c.execute('''CREATE TABLE IF NOT EXISTS results (
+        id INTEGER PRIMARY KEY,
+        target_id INTEGER,
+        module TEXT,
+        timestamp TEXT,
+        summary TEXT,
+        raw_data TEXT,
+        FOREIGN KEY(target_id) REFERENCES targets(id),
+        UNIQUE(target_id, module)
+    )''')
+    # artifacts normalized table
+    c.execute('''CREATE TABLE IF NOT EXISTS artifacts (
+        id INTEGER PRIMARY KEY,
+        type TEXT,
+        value TEXT UNIQUE,
+        source_module TEXT,
+        first_seen TEXT,
+        last_seen TEXT
+    )''')
+    c.execute('CREATE INDEX IF NOT EXISTS idx_artifacts_type ON artifacts(type)')
+    # FTS5 notes
+    try:
+        c.execute("CREATE VIRTUAL TABLE IF NOT EXISTS notes_fts USING fts5(text, tokenize='porter')")
+    except sqlite3.OperationalError:
+        # FTS5 not available in this SQLite build; ignore
+        pass
     conn.commit()
 
 def create_case(case_name: str, primary_target: str):
@@ -154,8 +282,21 @@ def create_case(case_name: str, primary_target: str):
         console.print(f"[red]DB error: {e}[/red]")
         return None, None
 
-def load_case():
+def load_case(case_name: Optional[str] = None):
     CASES_DIR.mkdir(exist_ok=True)
+    if case_name:
+        db_path = CASES_DIR / f"{case_name.replace(' ', '_').lower()}.db"
+        if not db_path.exists():
+            console.print(f"[red]Case '{case_name}' not found.[/red]")
+            return None, None
+        try:
+            conn = sqlite3.connect(db_path)
+            console.print(f"[green]✓ Case '{case_name}' loaded.[/green]")
+            return conn, case_name
+        except sqlite3.Error as e:
+            console.print(f"[red]DB error: {e}[/red]")
+            return None, None
+
     cases = sorted([f for f in CASES_DIR.glob("*.db")])
     if not cases:
         console.print("[yellow]No existing cases found.[/yellow]")
@@ -176,28 +317,51 @@ def load_case():
         console.print(f"[red]DB error: {e}[/red]")
         return None, None
 
-def save_result_to_db(conn: sqlite3.Connection, module: str, target_name: str, result: dict):
-    c = conn.cursor()
-    # ensure target exists and set type
-    primary_exists = c.execute("SELECT id FROM targets WHERE type='primary'").fetchone() is not None
-    c.execute("INSERT OR IGNORE INTO targets (name, type) VALUES (?, ?)", (target_name, 'primary' if not primary_exists else 'secondary'))
-    target_id = c.execute("SELECT id FROM targets WHERE name = ?", (target_name,)).fetchone()[0]
-    c.execute("""
-        INSERT INTO results (target_id, module, timestamp, summary, raw_data) VALUES (?, ?, ?, ?, ?)
-        ON CONFLICT(target_id, module) DO UPDATE SET
-            timestamp=excluded.timestamp, summary=excluded.summary, raw_data=excluded.raw_data;
-    """, (target_id, module, datetime.now(timezone.utc).isoformat(), result.get('summary', ''), json.dumps(result.get('raw'))))
-    conn.commit()
-    logging.info(f"Saved/Updated result for '{module}' on '{target_name}' to the database.")
-
-def get_all_case_results(conn: sqlite3.Connection):
-    # set row factory on the CONNECTION, not the cursor
+def get_primary_target(conn: sqlite3.Connection) -> str:
     conn.row_factory = sqlite3.Row
     c = conn.cursor()
-    row = c.execute("SELECT name FROM targets WHERE type = 'primary' LIMIT 1").fetchone()
-    primary_target = row['name'] if row else 'Unknown'
+    row = c.execute("SELECT name FROM targets WHERE type='primary' LIMIT 1").fetchone()
+    return row['name'] if row else 'Unknown'
+
+def save_result_to_db(conn: sqlite3.Connection, module: str, target_name: str, result: dict):
+    c = conn.cursor()
+    primary_exists = c.execute("SELECT id FROM targets WHERE type='primary'").fetchone() is not None
+    c.execute("INSERT OR IGNORE INTO targets (name, type) VALUES (?, ?)", (target_name, 'primary' if not primary_exists else 'secondary'))
+    target_id = c.execute("SELECT id FROM targets WHERE name=?", (target_name,)).fetchone()[0]
+    c.execute("""
+        INSERT INTO results (target_id, module, timestamp, summary, raw_data)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(target_id, module) DO UPDATE SET
+            timestamp=excluded.timestamp, summary=excluded.summary, raw_data=excluded.raw_data
+    """, (target_id, module, utcnow_iso(), result.get('summary', ''), json.dumps(result.get('raw', {}))))
+    conn.commit()
+
+def ingest_text_fts(conn: sqlite3.Connection, text: str):
+    if not text:
+        return
+    try:
+        c = conn.cursor()
+        c.execute("INSERT INTO notes_fts (text) VALUES (?)", (text,))
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass  # FTS5 not available
+
+def upsert_artifact(conn: sqlite3.Connection, a_type: str, value: str, source_module: str):
+    c = conn.cursor()
+    existing = c.execute("SELECT id FROM artifacts WHERE value=?", (value,)).fetchone()
+    now = utcnow_iso()
+    if existing:
+        c.execute("UPDATE artifacts SET last_seen=? WHERE id=?", (now, existing[0]))
+    else:
+        c.execute("INSERT OR IGNORE INTO artifacts (type, value, source_module, first_seen, last_seen) VALUES (?, ?, ?, ?, ?)",
+                  (a_type, value, source_module, now, now))
+    conn.commit()
+
+def get_all_case_results(conn: sqlite3.Connection):
+    conn.row_factory = sqlite3.Row
+    c = conn.cursor()
     rows = c.execute("""
-        SELECT t.name as tname, r.module, r.summary, r.raw_data
+        SELECT t.name as tname, r.module, r.summary, r.raw_data, r.timestamp
         FROM results r JOIN targets t ON r.target_id = t.id
         ORDER BY r.timestamp DESC
     """).fetchall()
@@ -211,145 +375,55 @@ def get_all_case_results(conn: sqlite3.Connection):
                 "summary": row['summary'],
                 "raw": json.loads(row['raw_data']) if row['raw_data'] else None
             }
-    return results, primary_target
+    return results
 
-# --- OSINT Fetcher Modules ---
+# ---------- Artifact Extraction ----------
+ARTIFACT_PATTERNS = {
+    "email": r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}",
+    "phone": r"(?:\+?\d{1,3}[-.\s]?)?(?:\(?\d{3}\)?[-.\s]?){2}\d{4}",
+    "domain": r"\b(?!(?:\d{1,3}\.){3}\d{1,3}\b)(?:[a-z0-9-]+\.)+[a-z]{2,}\b",
+    "ip": r"\b(?:\d{1,3}\.){3}\d{1,3}\b",
+    "url": r"https?://[^\s\"'>]+",
+    "handle": r"(?<=\s|^|[@])@[A-Za-z0-9_]{2,30}"
+}
 
-# aligned to dispatcher name
-def fetch_username_check(target: str, config: dict, session: requests.Session):
-    found_sites = []
+def extract_artifacts(text: str) -> List[Tuple[str, str]]:
+    found = []
+    blob = text or ""
+    for t, pat in ARTIFACT_PATTERNS.items():
+        for m in re.findall(pat, blob, flags=re.I):
+            v = m.strip()
+            if t in ("email", "domain", "handle"):
+                v = v.lower()
+            found.append((t, v))
+    # dedupe
+    uniq = list({(t, v) for t, v in found})
+    return uniq
 
-    def check_site(site, url_format):
-        try:
-            # some sites 405 on HEAD; fallback to GET on non-200/405
-            res = session.head(url_format.format(target), timeout=REQUEST_TIMEOUT, allow_redirects=True)
-            if res.status_code == 200:
-                found_sites.append({"site": site, "url": res.url})
-            elif res.status_code in (403, 405):
-                res = session.get(url_format.format(target), timeout=REQUEST_TIMEOUT, allow_redirects=True)
-                if res.status_code == 200:
-                    found_sites.append({"site": site, "url": res.url})
-        except requests.RequestException:
-            pass
+def ingest_from_result(conn: sqlite3.Connection, module_key: str, result: dict):
+    # Ingest text for FTS + artifacts
+    text_parts = []
+    raw = result.get("raw") or {}
+    def add_text(val):
+        if isinstance(val, str):
+            text_parts.append(val)
+    # Walk raw dict safely
+    def walk(x):
+        if isinstance(x, dict):
+            for v in x.values():
+                walk(v)
+        elif isinstance(x, list):
+            for v in x:
+                walk(v)
+        elif isinstance(x, str):
+            add_text(x)
+    walk(raw)
+    text_all = "\n".join(text_parts)[:300000]  # cap
+    ingest_text_fts(conn, text_all)
+    for t, v in extract_artifacts(text_all):
+        upsert_artifact(conn, t, v, module_key)
 
-    with ThreadPoolExecutor(max_workers=10) as executor:
-        list(executor.map(check_site, SITES_FOR_USERNAME_CHECK.keys(), SITES_FOR_USERNAME_CHECK.values()))
-
-    summary = f"Username '{target}' found on {len(found_sites)} sites: {', '.join(s['site'] for s in found_sites)}"
-    return {"raw": {"found_on": found_sites}, "summary": summary}
-
-def fetch_domain_info(target: str, config: dict, session: requests.Session):
-    try:
-        w = whois.whois(target)
-        dns_records = {}
-        for rt in ['A', 'MX', 'TXT', 'NS']:
-            try:
-                dns_records[rt] = [str(r) for r in dns.resolver.resolve(target, rt)]
-            except Exception:
-                dns_records[rt] = []
-        raw = {"whois": {k: (v.isoformat() if hasattr(v, "isoformat") else v) for k, v in w.items() if v}, "dns": dns_records}
-        summary = f"WHOIS for '{target}' found. Registrar: {w.get('registrar', 'N/A')}."
-        return {"raw": raw, "summary": summary}
-    except Exception as e:
-        return {"raw": None, "summary": f"Domain info error: {e}"}
-
-def fetch_hibp_email(target: str, config: dict, session: requests.Session):
-    api_key = config.get("hibp", {}).get("api_key")
-    if not api_key:
-        return {"raw": None, "summary": "HIBP skipped (no api_key)"}
-    if not re.match(r"[^@]+@[^@]+\.[^@]+", target):
-        return {"raw": None, "summary": "Invalid email format."}
-    headers = {"hibp-api-key": api_key, "user-agent": "BioDaemon"}
-    url = f"https://haveibeenpwned.com/api/v3/breachedaccount/{target}"
-    try:
-        response = session.get(url, headers=headers, params={"truncateResponse": "false"}, timeout=REQUEST_TIMEOUT)
-        if response.status_code == 404:
-            return {"raw": None, "summary": f"[green]No breaches found for {target}.[/green]"}
-        response.raise_for_status()
-        breaches = response.json()
-        summary = f"[bold red]Found in {len(breaches)} breaches.[/bold red] Top 5: {', '.join(b['Name'] for b in breaches[:5])}"
-        return {"raw": {"breaches": breaches}, "summary": summary}
-    except requests.exceptions.HTTPError as e:
-        return {"raw": None, "summary": f"HIBP API error: {e.response.status_code}"}
-    except Exception as e:
-        return {"raw": None, "summary": f"HIBP error: {e}"}
-
-def fetch_twitter(target: str, config: dict, session: requests.Session):
-    creds = config.get("twitter")
-    if not creds:
-        return {"raw": None, "summary": "Twitter skipped (missing credentials)"}
-    try:
-        client = tweepy.Client(
-            bearer_token=creds.get("bearer_token"),
-            consumer_key=creds.get("api_key"),
-            consumer_secret=creds.get("api_secret"),
-            access_token=creds.get("access_token"),
-            access_token_secret=creds.get("access_secret"),
-            wait_on_rate_limit=True
-        )
-        user_resp = client.get_user(username=target.lstrip("@"), user_fields=["public_metrics", "description", "location"])
-        user_obj = user_resp.data
-        if not user_obj:
-            return {"raw": None, "summary": f"User {target} not found."}
-        pm = user_obj.public_metrics or {}
-        user_info = {
-            "id": int(user_obj.id),
-            "username": user_obj.username,
-            "name": user_obj.name,
-            "description": user_obj.description,
-            "location": user_obj.location,
-            "followers_count": pm.get("followers_count"),
-            "following_count": pm.get("following_count"),
-            "tweet_count": pm.get("tweet_count")
-        }
-        tweets_resp = client.get_users_tweets(id=user_obj.id, max_results=20, tweet_fields=["public_metrics", "created_at"])
-        tweets = [{
-            "id": int(t.id),
-            "text": t.text,
-            "retweets": (t.public_metrics or {}).get("retweet_count", 0),
-            "likes": (t.public_metrics or {}).get("like_count", 0),
-            "created_at": t.created_at.isoformat() if t.created_at else None
-        } for t in (tweets_resp.data or [])]
-        summary = f"@{user_info['username']} - Followers: {user_info['followers_count']}. Fetched {len(tweets)} tweets."
-        return {"raw": {"user_info": user_info, "posted_tweets": tweets}, "summary": summary}
-    except Exception as e:
-        return {"raw": None, "summary": f"Twitter API error: {e}"}
-
-def fetch_reddit(target: str, config: dict, session: requests.Session):
-    creds = config.get("reddit", {})
-    # Expect: client_id, client_secret, user_agent
-    if not all(creds.get(k) for k in ("client_id", "client_secret", "user_agent")):
-        return {"raw": None, "summary": "Reddit skipped (missing credentials)"}
-    try:
-        reddit = praw.Reddit(
-            client_id=creds["client_id"],
-            client_secret=creds["client_secret"],
-            user_agent=creds["user_agent"]
-        )
-        user = reddit.redditor(target)
-        comments = []
-        for c in user.comments.new(limit=30):
-            comments.append({
-                "subreddit": str(c.subreddit),
-                "score": c.score,
-                "created_utc": datetime.fromtimestamp(c.created_utc, tz=timezone.utc).isoformat(),
-                "body": c.body[:500]
-            })
-        submissions = []
-        for s in user.submissions.new(limit=15):
-            submissions.append({
-                "subreddit": str(s.subreddit),
-                "score": s.score,
-                "created_utc": datetime.fromtimestamp(s.created_utc, tz=timezone.utc).isoformat(),
-                "title": s.title,
-                "url": s.url
-            })
-        summary = f"u/{target}: {len(submissions)} posts, {len(comments)} comments fetched."
-        return {"raw": {"comments": comments, "submissions": submissions}, "summary": summary}
-    except Exception as e:
-        return {"raw": None, "summary": f"Reddit API error: {e}"}
-
-# --- Analysis & Reporting ---
+# ---------- NER ----------
 def apply_ner_analysis(results: dict):
     console.print("\n[cyan]Performing Named Entity Recognition...[/cyan]")
     ner_results = {"PERSON": set(), "ORG": set(), "GPE": set(), "PRODUCT": set()}
@@ -358,25 +432,34 @@ def apply_ner_analysis(results: dict):
         raw = data.get("raw")
         if not raw:
             continue
-        if data.get("module") == "twitter":
-            all_text += (raw.get("user_info", {}).get("description", "") or "")
-            all_text += " " + " ".join([t.get("text", "") for t in raw.get("posted_tweets", [])])
-        elif data.get("module") == "reddit":
-            all_text += " " + " ".join([c.get("body", "") for c in raw.get("comments", [])])
+        # collect likely text fields
+        def walk(x):
+            nonlocal all_text
+            if isinstance(x, dict):
+                for v in x.values():
+                    walk(v)
+            elif isinstance(x, list):
+                for v in x:
+                    walk(v)
+            elif isinstance(x, str):
+                all_text += " " + x
+        walk(raw)
+    if not all_text.strip():
+        return {"summary": "No text found for NER.", "raw": {k: [] for k in ner_results}, "module": "NER Analysis", "target": "corpus"}
     doc = nlp(all_text)
     for ent in doc.ents:
         if ent.label_ in ner_results and len(ent.text.strip()) > 2:
             ner_results[ent.label_].add(ent.text.strip())
     for key in ner_results:
         ner_results[key] = sorted(list(ner_results[key]))
-    results["ner_analysis"] = {
+    return {
         "summary": f"Found {len(ner_results['PERSON'])} people, {len(ner_results['ORG'])} orgs, {len(ner_results['GPE'])} locations.",
         "raw": ner_results,
         "module": "NER Analysis",
         "target": "corpus"
     }
-    return results
 
+# ---------- Reporting ----------
 def generate_interactive_graph(results: dict, primary_target: str, filename: str):
     net = Network(height="800px", width="100%", bgcolor="#222222", font_color="white", notebook=True)
     net.add_node(primary_target, color="#ff4757", size=25, title=f"Primary Target: {primary_target}")
@@ -390,14 +473,24 @@ def generate_interactive_graph(results: dict, primary_target: str, filename: str
         base_node = primary_target if target_name == primary_target else target_name
         if base_node != node_id:
             net.add_edge(base_node, node_id)
-        # avoid duplicate target node
         if target_name != primary_target and not any(n.get('id') == target_name for n in net.nodes):
             net.add_node(target_name, color="#ffa502", size=20, title=f"Associated Target: {target_name}")
             net.add_edge(primary_target, target_name)
     net.set_options('{"physics": {"barnesHut": {"gravitationalConstant": -40000, "centralGravity": 0.4, "springLength": 120}}}')
     net.save_graph(filename)
 
-def generate_html_report(results: dict, primary_target: str, filenames: dict):
+def export_gexf(results: dict, primary: str, out_path: str):
+    g = nx.Graph()
+    g.add_node(primary, kind="primary")
+    for d in results.values():
+        if not d.get("raw"):
+            continue
+        node = f"{d['module']}::{d['target']}"
+        g.add_node(node, kind="module", summary=d.get("summary", ""))
+        g.add_edge(primary if d['target'] == primary else d['target'], node)
+    nx.write_gexf(g, out_path)
+
+def generate_html_report(results: dict, primary_target: str, graph_file: str, out_html: str):
     HTML_TEMPLATE = """
     <!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title>BioDaemon Report: {{ target }}</title>
     <style>body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;background-color:#121212;color:#e0e0e0;margin:0;padding:20px}h1,h2{color:#74b9ff;border-bottom:2px solid #74b9ff}
@@ -410,7 +503,7 @@ def generate_html_report(results: dict, primary_target: str, filenames: dict):
     {% for label, entities in results.ner_analysis.raw.items() if entities %}<h3>{{ label }}</h3><pre>{{ entities | join(', ') }}</pre>{% endfor %}</div>{% endif %}
     <div class="section"><h2>Relationship Graph</h2><iframe src="{{ graph_file }}" class="graph-container" frameborder="0"></iframe></div>
     {% for key, data in results.items() if key != 'ner_analysis' %}<div class="section"><h2>{{ data.module | replace('_', ' ') | title }} on '{{ data.target }}'</h2>
-    <p><b>Summary:</b> {{ data.summary | replace('\\n', '<br>') | safe }}</p><h3>Raw Data:</h3><pre>{{ data.raw | tojson(indent=4) }}</pre></div>{% endfor %}
+    <p><b>Summary:</b> {{ data.summary | replace('\\n', '<br>') | safe }}</p><h3>Raw Data:</h3><pre>{{ data.raw | tojson(indent=2) }}</pre></div>{% endfor %}
     </div></body></html>
     """
     env = Environment(autoescape=select_autoescape(['html']))
@@ -419,81 +512,385 @@ def generate_html_report(results: dict, primary_target: str, filenames: dict):
         target=primary_target,
         timestamp=datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC'),
         results=results,
-        graph_file=Path(filenames["graph"]).name
+        graph_file=Path(graph_file).name
     )
-    with open(filenames["html"], "w", encoding="utf-8") as f:
+    with open(out_html, "w", encoding="utf-8") as f:
         f.write(rendered_html)
 
-# --- Main Application Logic ---
-def run_investigation(conn: sqlite3.Connection):
-    options = {
-        "username_check": ("Username Availability", "username"),
-        "domain_info": ("Domain WHOIS/DNS", "domain"),
-        "twitter": ("Twitter", "username"),
-        "reddit": ("Reddit", "username"),
-        "hibp_email": ("HaveIBeenPwned", "email")
-    }
-    options_list = list(options.keys())
-    table = Table(title="Available Modules")
-    table.add_column("ID", style="cyan")
-    table.add_column("Module")
-    table.add_column("Input Type")
-    for idx, name in enumerate(options_list, 1):
-        table.add_row(str(idx), options[name][0], options[name][1])
+def export_pdf_from_html(html_path: str, pdf_path: str):
+    if WeasyHTML is None:
+        return False, "WeasyPrint not installed"
+    try:
+        WeasyHTML(filename=html_path).write_pdf(pdf_path)
+        return True, "ok"
+    except Exception as e:
+        return False, str(e)
+
+# ---------- Module System (in-file registry) ----------
+# Spec: key, title, input_type, async_run(target, config, http) -> {raw, summary}
+ModuleSpec = Dict[str, Any]
+MODULES: Dict[str, ModuleSpec] = {}
+
+def register_module(key: str, title: str, input_type: str):
+    def deco(fn: Callable):
+        MODULES[key] = {"key": key, "title": title, "input_type": input_type, "run": fn}
+        return fn
+    return deco
+
+@register_module("username_check", "Username Availability", "username")
+async def mod_username_check(target: str, config: dict, http: Http) -> dict:
+    found = []
+
+    async def check(name, url_fmt):
+        url = url_fmt.format(target)
+        status = await with_backoff(lambda: http.head_or_get(url))
+        if status == 200:
+            found.append({"site": name, "url": url})
+
+    await asyncio.gather(*[check(name, fmt) for name, fmt in SITES_FOR_USERNAME_CHECK.items()])
+    summary = f"Username '{target}' found on {len(found)} sites: {', '.join(s['site'] for s in found)}"
+    return {"raw": {"found_on": found}, "summary": summary}
+
+@register_module("domain_info", "Domain WHOIS/DNS", "domain")
+async def mod_domain_info(target: str, config: dict, http: Http) -> dict:
+    loop = asyncio.get_event_loop()
+    def blocking_whois():
+        try:
+            return whois.whois(target)
+        except Exception as e:
+            return {"_error": str(e)}
+    w = await loop.run_in_executor(None, blocking_whois)
+    dns_records = {}
+    for rt in ['A', 'MX', 'TXT', 'NS']:
+        try:
+            answers = dns.resolver.resolve(target, rt)
+            dns_records[rt] = [str(r) for r in answers]
+        except Exception:
+            dns_records[rt] = []
+    raw = {"whois": {k: (v.isoformat() if hasattr(v, "isoformat") else v) for k, v in (w.items() if hasattr(w, "items") else w.items() if isinstance(w, dict) else {}).items()}, "dns": dns_records}
+    registrar = (raw.get("whois") or {}).get("registrar", "N/A")
+    summary = f"WHOIS for '{target}' found. Registrar: {registrar}."
+    return {"raw": raw, "summary": summary}
+
+@register_module("hibp_email", "HaveIBeenPwned", "email")
+async def mod_hibp_email(target: str, config: dict, http: Http) -> dict:
+    api_key = (config.get("hibp") or {}).get("api_key")
+    if not api_key or not re.match(r"[^@]+@[^@]+\.[^@]+", target):
+        return {"raw": None, "summary": "HIBP skipped (missing API key or invalid email)"}
+    headers = {"hibp-api-key": api_key, "user-agent": "BioDaemon"}
+    url = f"https://haveibeenpwned.com/api/v3/breachedaccount/{target}?truncateResponse=false"
+    async def req():
+        async with http.session_ctx() as s:
+            async with s.get(url, headers=headers, proxy=http.proxy, timeout=REQUEST_TIMEOUT) as r:
+                if r.status == 404:
+                    return {"raw": None, "summary": f"[green]No breaches found for {target}.[/green]"}
+                r.raise_for_status()
+                data = await r.json()
+                return {"raw": {"breaches": data}, "summary": f"[bold red]Found in {len(data)} breaches.[/bold red] Top 5: {', '.join(b['Name'] for b in data[:5])}"}
+    try:
+        return await with_backoff(req)
+    except aiohttp.ClientResponseError as e:
+        return {"raw": None, "summary": f"HIBP API error: {e.status}"}
+    except Exception as e:
+        return {"raw": None, "summary": f"HIBP error: {e}"}
+
+@register_module("twitter", "Twitter", "username")
+async def mod_twitter(target: str, config: dict, http: Http) -> dict:
+    creds = (config.get("twitter") or {})
+    if not tweepy or not creds:
+        return {"raw": None, "summary": "Twitter skipped (missing tweepy or credentials)"}
+    def blocking():
+        try:
+            client = tweepy.Client(
+                bearer_token=creds.get("bearer_token"),
+                consumer_key=creds.get("api_key"),
+                consumer_secret=creds.get("api_secret"),
+                access_token=creds.get("access_token"),
+                access_token_secret=creds.get("access_secret"),
+                wait_on_rate_limit=True
+            )
+            user_resp = client.get_user(username=target.lstrip("@"), user_fields=["public_metrics", "description", "location"])
+            user_obj = user_resp.data
+            if not user_obj:
+                return {"raw": None, "summary": f"User {target} not found."}
+            pm = user_obj.public_metrics or {}
+            user_info = {
+                "id": int(user_obj.id),
+                "username": user_obj.username,
+                "name": user_obj.name,
+                "description": user_obj.description,
+                "location": user_obj.location,
+                "followers_count": pm.get("followers_count"),
+                "following_count": pm.get("following_count"),
+                "tweet_count": pm.get("tweet_count")
+            }
+            tweets_resp = client.get_users_tweets(id=user_obj.id, max_results=20, tweet_fields=["public_metrics", "created_at"])
+            tweets = [{
+                "id": int(t.id),
+                "text": t.text,
+                "retweets": (t.public_metrics or {}).get("retweet_count", 0),
+                "likes": (t.public_metrics or {}).get("like_count", 0),
+                "created_at": t.created_at.isoformat() if t.created_at else None
+            } for t in (tweets_resp.data or [])]
+            summary = f"@{user_info['username']} - Followers: {user_info['followers_count']}. Fetched {len(tweets)} tweets."
+            return {"raw": {"user_info": user_info, "posted_tweets": tweets}, "summary": summary}
+        except Exception as e:
+            return {"raw": None, "summary": f"Twitter API error: {e}"}
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, blocking)
+
+@register_module("reddit", "Reddit", "username")
+async def mod_reddit(target: str, config: dict, http: Http) -> dict:
+    creds = (config.get("reddit") or {})
+    if not praw or not all(creds.get(k) for k in ("client_id", "client_secret", "user_agent")):
+        return {"raw": None, "summary": "Reddit skipped (missing praw or credentials)"}
+    def blocking():
+        try:
+            r = praw.Reddit(client_id=creds["client_id"], client_secret=creds["client_secret"], user_agent=creds["user_agent"])
+            user = r.redditor(target)
+            comments = []
+            for c in user.comments.new(limit=30):
+                comments.append({
+                    "subreddit": str(c.subreddit),
+                    "score": c.score,
+                    "created_utc": datetime.fromtimestamp(c.created_utc, tz=timezone.utc).isoformat(),
+                    "body": c.body[:1000]
+                })
+            submissions = []
+            for s in user.submissions.new(limit=15):
+                submissions.append({
+                    "subreddit": str(s.subreddit),
+                    "score": s.score,
+                    "created_utc": datetime.fromtimestamp(s.created_utc, tz=timezone.utc).isoformat(),
+                    "title": s.title,
+                    "url": s.url
+                })
+            summary = f"u/{target}: {len(submissions)} posts, {len(comments)} comments fetched."
+            return {"raw": {"comments": comments, "submissions": submissions}, "summary": summary}
+        except Exception as e:
+            return {"raw": None, "summary": f"Reddit API error: {e}"}
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, blocking)
+
+# ---------- Runner ----------
+async def run_modules(conn: sqlite3.Connection, selections: List[Tuple[str, str]], config: dict, http: Http):
+    # selections: list of (module_key, target_value)
+    tasks = []
+    for mkey, targ in selections:
+        mod = MODULES.get(mkey)
+        if not mod or not targ:
+            continue
+        async def _run(m=mod, t=targ):
+            try:
+                res = await m["run"](t, config, http)
+                if res and (res.get("raw") is not None or res.get("summary")):
+                    save_result_to_db(conn, m["key"], t, res)
+                    ingest_from_result(conn, m["key"], res)
+                    console.print(f"[green]✓ {m['title']} finished:[/green] {res.get('summary','(no summary)')}")
+                else:
+                    console.print(f"[yellow]• {m['title']} yielded no data.[/yellow]")
+            except Exception as e:
+                console.print(f"[red]✗ {m['title']} on '{t}' failed: {e}[/red]")
+        tasks.append(_run())
+    if tasks:
+        await asyncio.gather(*tasks)
+
+# ---------- CLI / Interactive ----------
+def capability_table(config: dict):
+    table = Table(title="Capabilities")
+    table.add_column("Module", style="cyan")
+    table.add_column("Status")
+    def ok(b): return "[green]enabled[/green]" if b else "[yellow]limited[/yellow]"
+    table.add_row("Twitter", ok(tweepy and config.get("twitter")))
+    table.add_row("Reddit", ok(praw and config.get("reddit") and all((config["reddit"].get(k) for k in ("client_id","client_secret","user_agent")))))
+    table.add_row("HIBP", ok((config.get("hibp") or {}).get("api_key")))
+    table.add_row("Playwright", ok(async_playwright is not None))
     console.print(table)
 
-    choice_str = Prompt.ask("Enter module IDs to run (e.g., 1,3,5)")
-    selected_ids = validate_choice(choice_str, len(options_list))
-    if not selected_ids:
-        console.print("[red]No valid modules selected.[/red]")
+def interactive_menu(conn: sqlite3.Connection, case_name: str, config: dict):
+    primary = get_primary_target(conn)
+    capability_table(config)
+    while True:
+        console.print(f"\n[bold]Investigation Menu for Case:[/bold] [yellow]{case_name}[/yellow] (Primary: [magenta]{primary}[/magenta])")
+        console.print("[cyan]1.[/cyan] Run Investigation Modules")
+        console.print("[cyan]2.[/cyan] Generate Full Case Report")
+        console.print("[cyan]3.[/cyan] Show Artifacts")
+        console.print("[cyan]4.[/cyan] Return to Main Menu")
+        action = Prompt.ask("Select an action", choices=["1", "2", "3", "4"], default="1")
+        if action == "1":
+            # module selection
+            keys = list(MODULES.keys())
+            table = Table(title="Available Modules")
+            table.add_column("ID", style="cyan")
+            table.add_column("Module")
+            table.add_column("Input Type")
+            for idx, k in enumerate(keys, 1):
+                table.add_row(str(idx), MODULES[k]["title"], MODULES[k]["input_type"])
+            console.print(table)
+            raw_choice = Prompt.ask("Enter module IDs to run (e.g., 1,3,5)")
+            try:
+                ids = sorted({int(x.strip()) for x in raw_choice.split(",")})
+            except Exception:
+                console.print("[red]Invalid selection.[/red]")
+                continue
+            selections = []
+            for i in ids:
+                if 1 <= i <= len(keys):
+                    k = keys[i - 1]
+                    t = Prompt.ask(f"Enter target for {MODULES[k]['title']} ({MODULES[k]['input_type']})").strip()
+                    selections.append((k, t))
+            if not selections:
+                console.print("[yellow]No modules selected.[/yellow]")
+                continue
+            # run async
+            http = Http(use_browser=False)
+            try:
+                asyncio.run(run_modules(conn, selections, config, http))
+            finally:
+                asyncio.run(http.close())
+        elif action == "2":
+            make_reports(conn, case_name)
+        elif action == "3":
+            show_artifacts(conn)
+        else:
+            break
+
+def show_artifacts(conn: sqlite3.Connection):
+    conn.row_factory = sqlite3.Row
+    c = conn.cursor()
+    rows = c.execute("SELECT type, value, source_module, first_seen, last_seen FROM artifacts ORDER BY type, value").fetchall()
+    if not rows:
+        console.print("[yellow]No artifacts stored yet.[/yellow]")
         return
-    selected_modules = [options_list[i - 1] for i in selected_ids]
+    table = Table(title="Artifacts")
+    table.add_column("Type", style="cyan"); table.add_column("Value"); table.add_column("Source"); table.add_column("First Seen"); table.add_column("Last Seen")
+    for r in rows:
+        table.add_row(r["type"], r["value"], r["source_module"], r["first_seen"], r["last_seen"])
+    console.print(table)
 
-    targets = {}
-    for module in selected_modules:
-        prompt_text = f"Enter target for {options[module][0]} ({options[module][1]})"
-        targets[module] = Prompt.ask(f"[bold]{prompt_text}[/bold]")
+def make_reports(conn: sqlite3.Connection, case_name: str, report_kinds: Optional[List[str]] = None):
+    console.print("[cyan]Gathering all case data for reporting...[/cyan]")
+    results = get_all_case_results(conn)
+    if not results:
+        console.print("[yellow]No results in case to report on.[/yellow]")
+        return
+    ner = apply_ner_analysis(results)
+    results_with_ner = dict(results)
+    results_with_ner["ner_analysis"] = ner
+    primary = get_primary_target(conn)
 
-    with Progress(SpinnerColumn(), TextColumn("[progress.description]{task.description}"), transient=True) as progress:
-        scheduled = [(module, targ) for module, targ in targets.items() if targ]
-        if not scheduled:
-            console.print("[yellow]No targets provided.[/yellow]")
-            return
-        task_map = {progress.add_task(f"[green]Running {options[module][0]}...[/green]"): (module, targ) for module, targ in scheduled}
+    # paths
+    ts = datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')
+    out_dir = CASES_DIR / case_name / REPORTS_DIRNAME
+    out_dir.mkdir(parents=True, exist_ok=True)
+    graph_path = out_dir / f"graph_{case_name}_{ts}.html"
+    html_path = out_dir / f"REPORT_{case_name.upper()}_{ts}.html"
+    gexf_path = out_dir / f"graph_{case_name}_{ts}.gexf"
+    pdf_path = out_dir / f"REPORT_{case_name.upper()}_{ts}.pdf"
 
-        with ThreadPoolExecutor(max_workers=len(task_map)) as executor:
-            config = load_config()
-            session = get_session()
-            future_map = {}
-            for task_id, (module, targ) in task_map.items():
-                func = globals().get(f"fetch_{module}")
-                if not callable(func):
-                    console.print(f"[red]✗ No fetcher implemented for '{module}'.[/red]")
-                    progress.update(task_id, completed=1)
-                    continue
-                future = executor.submit(func, targ, config, session)
-                future_map[future] = task_id
+    generate_interactive_graph(results_with_ner, primary, str(graph_path))
+    generate_html_report(results_with_ner, primary, str(graph_path), str(html_path))
+    export_gexf(results_with_ner, primary, str(gexf_path))
 
-            for future in as_completed(future_map):
-                task_id = future_map[future]
-                module, targ = task_map[task_id]
-                try:
-                    result = future.result()
-                    if result and result.get("raw") is not None:
-                        save_result_to_db(conn, module, targ, result)
-                    console.print(f"[green]✓ {options[module][0]} finished:[/green] {result.get('summary', 'No summary.')}")
-                except Exception as e:
-                    console.print(f"[red]✗ {options[module][0]} on '{targ}' failed: {e}[/red]")
-                progress.update(task_id, completed=1)
+    msg = f"[bold green]✓ Reports saved:[/bold green]\n- HTML: {html_path}\n- Graph: {graph_path}\n- GEXF: {gexf_path}"
+    if report_kinds and "pdf" in report_kinds:
+        ok, why = export_pdf_from_html(str(html_path), str(pdf_path))
+        if ok:
+            msg += f"\n- PDF: {pdf_path}"
+        else:
+            msg += f"\n- PDF: [yellow]skipped ({why})[/yellow]"
+    console.print(msg)
 
+# ---------- Headless Runner ----------
+def parse_args():
+    ap = argparse.ArgumentParser(description="BioDaemon v1.3 OSINT")
+    ap.add_argument("--headless", action="store_true", help="Run without interactive prompts")
+    ap.add_argument("--new-case", type=str, help="Create a new case with this name")
+    ap.add_argument("--load-case", type=str, help="Load an existing case with this name")
+    ap.add_argument("--primary", type=str, help="Primary target name when creating a new case")
+    ap.add_argument("--modules", type=str, help="Comma-separated module keys to run")
+    # Inputs for modules (supply what you need)
+    ap.add_argument("--username", type=str, help="Username for username_check/twitter/reddit")
+    ap.add_argument("--domain", type=str, help="Domain for domain_info")
+    ap.add_argument("--email", type=str, help="Email for hibp_email")
+    # Network options
+    ap.add_argument("--proxy", type=str, help="HTTP/SOCKS proxy URL (e.g., socks5h://127.0.0.1:9050)")
+    ap.add_argument("--use-browser", action="store_true", help="Use Playwright for JS pages when needed (if installed)")
+    # Report options
+    ap.add_argument("--report", type=str, help="Comma-separated outputs: html,pdf,graph,gexf")
+    return ap.parse_args()
+
+def build_selections_from_args(mod_list: List[str], args) -> List[Tuple[str, str]]:
+    selections: List[Tuple[str, str]] = []
+    for m in mod_list:
+        spec = MODULES.get(m)
+        if not spec:
+            console.print(f"[yellow]Unknown module '{m}' (skipping).[/yellow]")
+            continue
+        itype = spec["input_type"]
+        val = None
+        if itype == "username":
+            val = args.username
+        elif itype == "domain":
+            val = args.domain
+        elif itype == "email":
+            val = args.email
+        if not val:
+            console.print(f"[yellow]Module '{m}' requires '{itype}' input (not provided) — skipping.[/yellow]")
+            continue
+        selections.append((m, val))
+    return selections
+
+def headless_flow(args, config):
+    # Case handling
+    conn, case_name = None, None
+    if args.new_case:
+        primary = args.primary or args.username or args.domain or args.email or "primary"
+        conn, case_name = create_case(args.new_case, primary)
+    elif args.load_case:
+        conn, case_name = load_case(args.load_case)
+    else:
+        console.print("[red]Headless mode requires --new-case or --load-case.[/red]")
+        sys.exit(1)
+    if not conn:
+        sys.exit(1)
+
+    # Modules to run
+    mod_list = [m.strip() for m in (args.modules or "").split(",") if m.strip()]
+    selections = build_selections_from_args(mod_list, args)
+    if selections:
+        http = Http(proxy=args.proxy, use_browser=args.use_browser)
+        try:
+            asyncio.run(run_modules(conn, selections, config, http))
+        finally:
+            asyncio.run(http.close())
+    else:
+        console.print("[yellow]No runnable modules provided.[/yellow]")
+
+    # Reports
+    report_kinds = [x.strip() for x in (args.report or "html,graph,gexf").split(",") if x.strip()]
+    make_reports(conn, case_name, report_kinds)
+
+# ---------- Main ----------
 def main():
-    console.print(Panel(Text("BioDaemon", justify="center"), title="[bold #569cd6]BioDaemon[/bold #569cd6]", subtitle="[cyan]OSINT Analysis Platform v1.2[/cyan]"))
+    console.print(Panel(Text("BioDaemon", justify="center"), title="[bold #569cd6]BioDaemon[/bold #569cd6]", subtitle="[cyan]OSINT Analysis Platform v1.3[/cyan]"))
+    config = load_config()
+    capability_table(config)
+
+    args = parse_args()
+    if args.headless:
+        headless_flow(args, config)
+        return
+
+    # Interactive
     conn, case_name = None, ""
     while True:
         if conn:
             conn.close()
         console.print("\n[bold]Case Management[/bold]")
-        console.print("[cyan]1.[/cyan] Create New Case\n[cyan]2.[/cyan] Load Existing Case\n[cyan]0.[/cyan] Exit")
+        console.print("[cyan]1.[/cyan] Create New Case")
+        console.print("[cyan]2.[/cyan] Load Existing Case")
+        console.print("[cyan]0.[/cyan] Exit")
         choice = Prompt.ask("Select an option", choices=["1", "2", "0"], default="1")
         if choice == "1":
             case_name_input = Prompt.ask("[bold]Enter case name[/bold]").strip()
@@ -508,30 +905,7 @@ def main():
 
         if conn:
             try:
-                while True:
-                    console.print(f"\n[bold]Investigation Menu for Case:[/bold] [yellow]{case_name}[/yellow]")
-                    console.print("[cyan]1.[/cyan] Run Investigation Modules\n[cyan]2.[/cyan] Generate Full Case Report\n[cyan]3.[/cyan] Return to Main Menu")
-                    action = Prompt.ask("Select an action", choices=["1", "2", "3"], default="1")
-                    if action == "1":
-                        run_investigation(conn)
-                    elif action == "2":
-                        console.print("[cyan]Gathering all case data for reporting...[/cyan]")
-                        all_results, primary_target = get_all_case_results(conn)
-                        if not all_results:
-                            console.print("[yellow]No results in case to report on.[/yellow]")
-                            continue
-                        all_results = apply_ner_analysis(all_results)
-                        report_timestamp = datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')
-                        filenames = {
-                            "json": f"report_{case_name}_{report_timestamp}.json",
-                            "graph": f"graph_{case_name}_{report_timestamp}.html",
-                            "html": f"REPORT_{case_name.upper()}_{report_timestamp}.html"
-                        }
-                        generate_interactive_graph(all_results, primary_target, filenames["graph"])
-                        generate_html_report(all_results, primary_target, filenames)
-                        console.print(f"\n[bold green]✓✓✓ Master interactive HTML report saved to [bold]{filenames['html']}[/bold][/green]")
-                    elif action == "3":
-                        break
+                interactive_menu(conn, case_name, config)
             finally:
                 if conn:
                     conn.close()
