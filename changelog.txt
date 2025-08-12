@@ -1,0 +1,9 @@
+### New in v1.6
+- **API-Free Recon Modules**  
+  - `search_ddg` — DuckDuckGo HTML search (free-text queries)  
+  - `dork_search` — Build and run classic Google dorks via DuckDuckGo  
+  - `wayback` — Pull historical site snapshots from the Internet Archive
+- **Expanded Username Enumeration**  
+  - Now checks GitHub, GitLab, Bitbucket, Twitter, Instagram, Reddit, Pinterest, Twitch, TikTok, YouTube, LinkedIn, Facebook, Medium, StackOverflow, Keybase, SoundCloud, Vimeo
+- **Cyberpunk UI Tweaks**  
+  - Rich color themes, neon accents, improved banners
