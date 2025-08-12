@@ -30,7 +30,7 @@ FEATURES:
 QUICK START (Linux/macOS)
 --------------------------------------------------
 1) Get the code
-git clone https://github.com/<you>/BioDaemon.git
+git clone https://github.com/wickednull/BioDaemon.git
 cd BioDaemon
 
 2) Make a Python virtual environment (recommended)
@@ -59,7 +59,7 @@ NOTE: Do not use `sudo python …` inside a venv. It bypasses your venv and trig
 --------------------------------------------------
 QUICK START (Windows 10/11 PowerShell)
 --------------------------------------------------
-git clone https://github.com/<you>/BioDaemon.git
+git clone https://github.com/wickednull/BioDaemon.git
 cd BioDaemon
 
 py -m venv venv
