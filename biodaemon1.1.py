@@ -98,6 +98,16 @@ def get_session(use_tor: bool = False):
             return None
     return session
 
+def validate_choice(input_str: str, options_len: int):
+    """Validates user's comma-separated module choices."""
+    try:
+        chosen = {int(item.strip()) for item in input_str.split(",")}
+        if all(1 <= idx <= options_len for idx in chosen):
+            return sorted(list(chosen))
+        return None
+    except ValueError:
+        return None
+
 # --- Database Management ---
 def init_database(conn: sqlite3.Connection):
     cursor = conn.cursor()
@@ -138,17 +148,12 @@ def load_case():
 
 def save_result_to_db(conn: sqlite3.Connection, module: str, target_name: str, result: dict):
     cursor = conn.cursor()
-    cursor.execute("INSERT OR IGNORE INTO targets (name, type) VALUES (?, ?)", (target_name, 'secondary' if not cursor.execute("SELECT id FROM targets WHERE type='primary'").fetchone() else 'primary' if cursor.execute("SELECT id FROM targets WHERE name=?", (target_name,)).fetchone() else 'secondary'))
+    cursor.execute("INSERT OR IGNORE INTO targets (name, type) VALUES (?, ?)", (target_name, 'primary' if not cursor.execute("SELECT id FROM targets WHERE type='primary'").fetchone() else 'secondary'))
     target_id = cursor.execute("SELECT id FROM targets WHERE name = ?", (target_name,)).fetchone()[0]
-    
-    # Use INSERT ON CONFLICT to simplify insert/update logic
     cursor.execute("""
-        INSERT INTO results (target_id, module, timestamp, summary, raw_data)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO results (target_id, module, timestamp, summary, raw_data) VALUES (?, ?, ?, ?, ?)
         ON CONFLICT(target_id, module) DO UPDATE SET
-            timestamp=excluded.timestamp,
-            summary=excluded.summary,
-            raw_data=excluded.raw_data;
+            timestamp=excluded.timestamp, summary=excluded.summary, raw_data=excluded.raw_data;
     """, (target_id, module, datetime.now().isoformat(), result.get('summary', ''), json.dumps(result.get('raw'))))
     conn.commit()
     logging.info(f"Saved/Updated result for '{module}' on '{target_name}' to the database.")
@@ -193,7 +198,7 @@ def fetch_domain_info(target: str, config: dict, session: requests.Session):
 
 def fetch_hibp_email(target: str, config: dict, session: requests.Session):
     api_key = config.get("hibp", {}).get("api_key")
-    if not api_key: return {"raw": None, "summary": "HIBP skipped (no api_key in credentials.json)"}
+    if not api_key: return {"raw": None, "summary": "HIBP skipped (no api_key)"}
     if not re.match(r"[^@]+@[^@]+\.[^@]+", target): return {"raw": None, "summary": "Invalid email format."}
     headers = {"hibp-api-key": api_key, "user-agent": "BioDaemon"}
     url = f"https://haveibeenpwned.com/api/v3/breachedaccount/{target}"
@@ -227,7 +232,7 @@ def fetch_twitter(target: str, config: dict, session: requests.Session):
 
 def apply_ner_analysis(results: dict):
     console.print("\n[cyan]Performing Named Entity Recognition...[/cyan]")
-    ner_results = {"PERSON": set(), "ORG": set(), "GPE": set(), "PRODUCT": set()} # GPE = Geopolitical Entity
+    ner_results = {"PERSON": set(), "ORG": set(), "GPE": set(), "PRODUCT": set()}
     all_text = ""
     for data in results.values():
         raw = data.get("raw")
@@ -244,21 +249,20 @@ def apply_ner_analysis(results: dict):
 def generate_interactive_graph(results: dict, primary_target: str, filename: str):
     net = Network(height="800px", width="100%", bgcolor="#222222", font_color="white", notebook=True)
     net.add_node(primary_target, color="#ff4757", size=25, title=f"Primary Target: {primary_target}")
-    # Add nodes for each finding
     for key, data in results.items():
         if not data.get("raw") or key == "ner_analysis": continue
         module_name = data['module'].replace("_", " ").title()
         target_name = data['target']
         node_id = f"{module_name} ({target_name})"
         net.add_node(node_id, label=node_id, color="#1e90ff", size=15, title=data.get('summary'))
-        net.add_edge(primary_target if target_name == primary_target else target_name, node_id)
+        base_node = primary_target if target_name == primary_target else target_name
+        if base_node != node_id: net.add_edge(base_node, node_id)
         if target_name != primary_target and not any(n['id'] == target_name for n in net.nodes):
             net.add_node(target_name, color="#ffa502", size=20, title=f"Associated Target: {target_name}")
             net.add_edge(primary_target, target_name)
-    # Add NER entities
     if "ner_analysis" in results:
         for label, entities in results["ner_analysis"]["raw"].items():
-            for entity in entities[:5]: # Limit to top 5 entities per category
+            for entity in entities[:5]:
                 net.add_node(entity, label=entity, color="#2ed573", size=10, title=f"Found Entity ({label})")
                 net.add_edge(primary_target, entity)
     net.set_options('{"physics": {"barnesHut": {"gravitationalConstant": -40000, "centralGravity": 0.4, "springLength": 120}}}')
@@ -293,25 +297,25 @@ def run_investigation(conn: sqlite3.Connection):
     for idx, name in enumerate(options_list, 1): table.add_row(str(idx), options[name][0], options[name][1])
     console.print(table)
     choice_str = Prompt.ask("Enter module IDs to run (e.g., 1,3,5)")
-    selected_ids = [int(i.strip()) for i in choice_str.split(',') if i.strip().isdigit()]
-    selected_modules = [options_list[i-1] for i in selected_ids if 1 <= i <= len(options_list)]
-    if not selected_modules: console.print("[red]No valid modules selected.[/red]"); return
+    selected_ids = validate_choice(choice_str, len(options_list))
+    if not selected_ids: console.print("[red]No valid modules selected.[/red]"); return
+    selected_modules = [options_list[i-1] for i in selected_ids]
     targets = {}
     for module in selected_modules:
         prompt_text = f"Enter target for {options[module][0]} ({options[module][1]})"
         targets[module] = Prompt.ask(f"[bold]{prompt_text}[/bold]")
     with Progress(SpinnerColumn(), TextColumn("[progress.description]{task.description}"), transient=True) as progress:
-        task_map = {progress.add_task(f"[green]Running {options[plat][0]}...[/green]"): (plat, targ) for plat, targ in targets.items() if targ}
+        task_map = {progress.add_task(f"[green]Running {options[module][0]}...[/green]"): (module, targ) for module, targ in targets.items() if targ}
         with ThreadPoolExecutor(max_workers=len(task_map)) as executor:
             config = load_config(); session = get_session()
-            future_map = {executor.submit(globals().get(f"fetch_{plat}"), targ, config, session): task_id for task_id, (plat, targ) in task_map.items()}
+            future_map = {executor.submit(globals().get(f"fetch_{module}"), targ, config, session): task_id for task_id, (module, targ) in task_map.items()}
             for future in as_completed(future_map):
-                task_id = future_map[future]; plat, targ = task_map[task_id]
+                task_id = future_map[future]; module, targ = task_map[task_id]
                 try:
                     result = future.result()
-                    if result and result.get("raw"): save_result_to_db(conn, plat, targ, result)
-                    console.print(f"[green]✓ {options[plat][0]} finished:[/green] {result.get('summary', 'No summary.')}")
-                except Exception as e: console.print(f"[red]✗ {options[plat][0]} on '{targ}' failed: {e}[/red]")
+                    if result and result.get("raw") is not None: save_result_to_db(conn, module, targ, result)
+                    console.print(f"[green]✓ {options[module][0]} finished:[/green] {result.get('summary', 'No summary.')}")
+                except Exception as e: console.print(f"[red]✗ {options[module][0]} on '{targ}' failed: {e}[/red]")
                 progress.update(task_id, completed=1)
 
 def main():
