@@ -37,7 +37,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 CYBER_BANNER = r"""
 [bold magenta]
 ╔═════════════════════════════════════════════════════════╗
-║     [#00ffe0]         ＢｉｏＤａｅｍｏｎ  １.８            ║ 
+║     [#00ffe0]         ＢｉｏＤａｅｍｏｎ  １.８              ║ 
 ║                    created by. Null_Lyfe   [#00ffe0]    ║
 ╚═════════════════════════════════════════════════════════╝
 [/bold magenta]
