@@ -27,7 +27,7 @@ from typing import Dict, Any, Callable, Optional, List, Tuple
 CYBER_BANNER = r"""
 [bold magenta]
 ╔═════════════════════════════════════════════════════════╗
-║     [#00ffe0]         ＢｉｏＤａｅｍｏｎ  １.８            ║ 
+║     [#00ffe0]           ＢｉｏＤａｅｍｏｎ                 ║ 
 ║                    created by. Null_Lyfe   [#00ffe0]    ║
 ╚═════════════════════════════════════════════════════════╝
 [/bold magenta]
