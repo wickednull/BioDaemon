@@ -55,7 +55,7 @@ BioDaemon uses Rich for a neon-style cyberpunk interface:
 - Real-time status panels
 
 ## Installation
-git clone https://github.com/YourUser/BioDaemon.git
+git clone https://github.com/wickednull/BioDaemon.git
 cd BioDaemon
 pip install -r requirements.txt
 python biodaemon.py
