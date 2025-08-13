@@ -59,7 +59,9 @@ git clone https://github.com/wickednull/BioDaemon.git
 
 cd BioDaemon
 
-pip install -r requirements.txt
+python3 -m venv venv
+source venv/bin/activate
+pip install requests beautifulsoup4 duckduckgo-search python-whois python-dotenv networkx matplotlib rich pandas lxml Pillow tldextract scikit-learn nltk spacy pygraphviz geopandas folium cryptography
 
 python biodaemon.py
 
