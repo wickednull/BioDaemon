@@ -965,7 +965,7 @@ def mod_pastebin_search(target: str, config: dict, http: HttpSync) -> dict:
     s,t,_=http.get_text(url)
     if s!=200: return {"raw":None,"summary":f"Pastebin search error HTTP {s}"}
     links=[]
-    for m in re.finditer(r '<a[^>]+class="result__a"[^>]+href="([^"]+)"', t, flags=re.I):
+    for m in re.finditer(r'<a[^>]+class="result__a"[^>]+href="([^"]+)"', t, flags=re.I):
         href = m.group(1)
         if href and href not in links:
             links.append(href)
