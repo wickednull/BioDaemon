@@ -2,10 +2,10 @@
 # -*- coding: utf-8 -*-
 
 """
-BioDaemon v1.8 (Option A - Sync Only)
+BioDaemon v1.8
 Cyberpunk OSINT & Recon Toolkit — created by. Null_Lyfe
 
-WHAT'S NEW (Option A)
+WHAT'S NEW 
 - Pure synchronous execution path (no asyncio, no aiohttp, no worker threads).
 - Fixes SQLite “objects created in a thread can only be used in that same thread”.
 - Preserves ALL features from 1.7/1.8: cyberpunk UI, case DB (SQLite+FTS5),
