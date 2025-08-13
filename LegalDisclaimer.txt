@@ -1,0 +1,91 @@
+Legal Disclaimer – BioDaemon
+
+Version: 1.0
+Last Updated: 2025-08-13
+
+⸻
+
+NOTICE TO USER:
+BioDaemon is a specialized OSINT (Open-Source Intelligence) and reconnaissance toolkit designed for cybersecurity research, lawful penetration testing, and educational purposes only. This software is intended to be used solely by individuals and organizations who have obtained explicit, written authorization from the systems’ owners prior to conducting any form of testing, reconnaissance, or analysis.
+
+By downloading, installing, accessing, or using BioDaemon, you agree to the following terms and conditions:
+
+⸻
+
+1. Authorized Use Only
+
+1.1 You must have full, explicit permission from the owner of any system, network, account, or data you interact with using BioDaemon.
+1.2 Unauthorized access to computer systems, data, or networks is a violation of local, state, federal, and international laws.
+1.3 Any use of this software without consent from the rightful owner is strictly prohibited and may result in criminal prosecution, civil liability, or both.
+
+⸻
+
+2. No Warranty
+
+2.1 BioDaemon is provided “as is” without any warranties of any kind, whether express, implied, statutory, or otherwise.
+2.2 The authors, contributors, and distributors make no warranties regarding the performance, accuracy, reliability, or suitability of BioDaemon for any specific purpose.
+2.3 You assume full responsibility for selecting BioDaemon to achieve your intended results and for the installation, use, and results obtained from it.
+
+⸻
+
+3. Limitation of Liability
+
+3.1 Under no circumstances shall the authors, contributors, distributors, or affiliates be liable for any direct, indirect, incidental, special, consequential, punitive, or exemplary damages arising from or relating to the use or inability to use BioDaemon, even if advised of the possibility of such damages.
+3.2 This includes, but is not limited to, damages for loss of profits, goodwill, data, or other intangible losses.
+
+⸻
+
+4. Compliance With Laws
+
+4.1 It is your sole responsibility to ensure that your use of BioDaemon complies with all applicable laws, regulations, and ethical guidelines in your jurisdiction.
+4.2 You acknowledge that laws governing cybersecurity, digital forensics, and OSINT vary between jurisdictions and that ignorance of the law is not a defense.
+4.3 You agree to consult qualified legal counsel if you are uncertain about the legality of your intended use.
+
+⸻
+
+5. No Malicious Use
+
+5.1 You will not use BioDaemon to:
+	•	Conduct unauthorized penetration testing, hacking, or reconnaissance.
+	•	Target systems for political, personal, or malicious purposes.
+	•	Commit harassment, stalking, or invasion of privacy.
+	•	Facilitate any activity that violates applicable laws.
+
+⸻
+
+6. Indemnification
+
+6.1 You agree to defend, indemnify, and hold harmless the authors, contributors, distributors, and affiliates from and against any and all claims, damages, liabilities, costs, and expenses (including legal fees) arising from:
+	•	Your violation of this disclaimer.
+	•	Your misuse or illegal use of BioDaemon.
+	•	Your violation of any rights of a third party.
+
+⸻
+
+7. Educational & Research Purpose Statement
+
+7.1 BioDaemon was created for:
+	•	Cybersecurity training in authorized environments.
+	•	Lawful network and application security assessments.
+	•	Academic and ethical research in OSINT and threat intelligence.
+	•	Demonstrating vulnerabilities to improve security awareness.
+
+7.2 BioDaemon should only be deployed in isolated lab environments or in production systems where you have written approval.
+
+⸻
+
+8. Export & Use Restrictions
+
+8.1 BioDaemon may be subject to export control laws and regulations. You agree to comply with all applicable restrictions.
+8.2 You will not use BioDaemon for the development, production, or use of weapons or for any purposes prohibited by applicable laws.
+
+⸻
+
+9. Acceptance of Terms
+
+By using BioDaemon, you acknowledge that you have read, understood, and agreed to this disclaimer in its entirety. If you do not agree, you must cease use immediately and remove all copies of BioDaemon from your systems.
+
+⸻
+
+© 2025 Null_Lyfe. All Rights Reserved.
+BioDaemon is a security research tool. Misuse may result in severe legal consequences
