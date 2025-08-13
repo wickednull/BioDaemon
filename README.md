@@ -56,8 +56,11 @@ BioDaemon uses Rich for a neon-style cyberpunk interface:
 
 ## Installation
 git clone https://github.com/wickednull/BioDaemon.git
+
 cd BioDaemon
+
 pip install -r requirements.txt
+
 python biodaemon.py
 
 First run will auto-install dependencies if missing.
