@@ -1009,7 +1009,7 @@ def capability_table(config: dict):
     table.add_row("Shodan", ok((config.get("shodan") or {}).get("api_key")))
     table.add_row("Censys", ok((config.get("censys") or {}).get("api_id") and (config.get("censys") or {}).get("api_secret")))
     table.add_row("GeoIP", "geopy", "folium", "weasyprint", "cryptography",
-            "phonenumbers", "ImageHash"
+            "phonenumbers", "ImageHash")
         ]
         subprocess.call([sys.executable, "-m", "pip", "install", *pkgs])
 
