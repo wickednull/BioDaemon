@@ -1,9 +1,101 @@
-### New in v1.6
-- **API-Free Recon Modules**  
-  - `search_ddg` — DuckDuckGo HTML search (free-text queries)  
-  - `dork_search` — Build and run classic Google dorks via DuckDuckGo  
-  - `wayback` — Pull historical site snapshots from the Internet Archive
-- **Expanded Username Enumeration**  
-  - Now checks GitHub, GitLab, Bitbucket, Twitter, Instagram, Reddit, Pinterest, Twitch, TikTok, YouTube, LinkedIn, Facebook, Medium, StackOverflow, Keybase, SoundCloud, Vimeo
-- **Cyberpunk UI Tweaks**  
-  - Rich color themes, neon accents, improved banners
+BioDaemon Changelog
+
+v1.0 – Initial Release
+	•	Core OSINT engine with cyberpunk-themed Rich UI.
+	•	Basic username reconnaissance across major platforms.
+	•	Email OSINT module (breach checks, pattern recognition, disposable domain detection).
+	•	Initial SQLite database integration for case storage.
+	•	Artifact storage and retrieval for recon results.
+	•	Basic HTML report export (PyVis graph).
+
+⸻
+
+v1.1
+	•	Added DNS enumeration (subdomain lookup, DNS records, resolvers).
+	•	Implemented WHOIS domain lookup.
+	•	Added GeoIP lookup (IP → ASN, country, provider).
+	•	Introduced EXIF data extraction from images.
+	•	Added natural language entity recognition (NER) via spaCy.
+	•	Improved Rich UI layout with neon-style panels and spinners.
+
+⸻
+
+v1.2
+	•	Shodan API integration (host/service search).
+	•	Censys API integration (certificate & service search).
+	•	Integrated Folium-based GeoMap report.
+	•	Added support for GEXF export (Gephi graph compatibility).
+	•	Improved database search with FTS5 full-text indexing.
+
+⸻
+
+v1.3
+	•	Added Wayback Machine scraping for historical site snapshots.
+	•	Expanded username recon to 50+ platforms.
+	•	Introduced breach parsing and credential artifact storage.
+	•	Added sentiment analysis for text sources.
+	•	Optional PDF report generation via WeasyPrint.
+
+⸻
+
+v1.4
+	•	Image reverse search (optional API).
+	•	Added Pastebin scraper for leaked data discovery (API-based at this stage).
+	•	Added Twitter and Reddit OSINT modules (API-based).
+	•	Introduced customizable case/project folders.
+	•	Minor cyberpunk UI refinements.
+
+⸻
+
+v1.5
+	•	GeoIP improvements (multiple sources for redundancy).
+	•	EXIF GPS extraction now plots directly on maps.
+	•	Refactored Shodan/Censys queries for faster results.
+	•	Added multi-threaded username checks.
+	•	Began groundwork for API-free fallback modes.
+
+⸻
+
+v1.6
+	•	API-free DuckDuckGo search (no dependency on official API).
+	•	Google Dork Builder + Search (custom queries with execution).
+	•	Expanded username checks to more obscure platforms.
+	•	Wayback Machine improvements (more snapshots per domain).
+	•	Initial LinkedIn scraping support (no API).
+
+⸻
+
+v1.7
+	•	Phone OSINT (carrier lookup, number validation, reputation scoring).
+	•	Email OSINT with enhanced breach lookup and pattern clustering.
+	•	Free image reverse search (no API required) + optional API mode.
+	•	LinkedIn search now fully functional without an API.
+	•	Threaded recon execution for faster multi-target lookups.
+
+⸻
+
+v1.7.1
+	•	GitHub dorking (no API) for exposed code, secrets, and assets.
+	•	Pastebin search (no API) for leaked credentials and information.
+	•	Added CLI quick recon mode.
+	•	Improved cyberpunk UI animations for long-running tasks.
+	•	Added static mode option for environments without async support.
+
+⸻
+
+v1.8
+	•	Quick Recon Mode: Fast, multi-threaded scan combining username, email, phone, and key dorks.
+	•	Static Runners: Full non-async execution option for compatibility and debugging.
+	•	Expanded artifact viewer to include all recon outputs in a central dashboard.
+	•	Refined reporting wrapper to simplify multi-format exports.
+	•	Enhanced database search commands for faster retrieval.
+	•	Added API auto-detection for available keys and fallback to free methods.
+
+⸻
+
+v1.8.1
+	•	Optimized quick recon threading for stability on slower systems.
+	•	UI refinements to keep cyberpunk theme consistent across static & async modes.
+	•	Improved GitHub and Pastebin scrapers for higher accuracy and fewer false positives.
+	•	Added better error handling for environments with limited network access.
+	•	Minor bug fixes and performance tweaks
